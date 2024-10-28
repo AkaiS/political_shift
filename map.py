@@ -1,5 +1,6 @@
 import requests
 from urllib3.exceptions import HTTPError
+from flask import Flask
 
 import pandas as pd
 import numpy as np
@@ -63,8 +64,8 @@ da_map = pd.Series(states_df['County'].values, index=states_df['ID'])
 da_map = da_map[~da_map.index.duplicated(keep='first')]
 diff['County'] = diff['ID'].map(da_map)
 
-
 app = Dash(__name__)
+server = app.server
 
 # set intial app data
 df = states_df[states_df['Year'] == 2020]
@@ -469,4 +470,4 @@ def update_map(value, click_data, _, map_select):
 
   return fig, election_map_box_style, county_info_box_style, None, map_select_style, graph_select_style
 
-app.run()
+# app.run()
