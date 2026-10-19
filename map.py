@@ -412,7 +412,7 @@ def update_map(value, click_data, _, map_select, selected_county):
                                       ))
 
   fig['layout']['uirevision'] = True
-  fig.update_layout(mapbox_style='carto-positron',
+  fig.update_layout(mapbox_style='open-street-map',
                     mapbox_zoom=3,
                     mapbox_center={'lat': 37.0902, 'lon': -95.7129})
   fig.update_layout(margin={'r': 0, 't': 0, 'b': 0, 'l': 0})

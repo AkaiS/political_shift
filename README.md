@@ -52,8 +52,8 @@ bottle app logs political-shift --instance akaisenghor.bottle.cloud
 `counties.geojson` comes from Plotly's
 [county geometry dataset](https://github.com/plotly/datasets/blob/0c447c47b757ad74edecab31f0d72f849d2e67c2/geojson-counties-fips.json).
 Both files load from the app directory, so server startup needs no network
-requests. The browser loads the basemap tiles from CARTO through Plotly's
-`carto-positron` style. No Mapbox token is required.
+requests. The browser loads OpenStreetMap basemap tiles through Plotly's
+`open-street-map` style. No API key is required.
 
 Direct dependency ranges live in `requirements.in`; `requirements.txt` pins
 the full environment. Refresh the lock with

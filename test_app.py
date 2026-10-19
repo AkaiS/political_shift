@@ -37,9 +37,11 @@ class AppTests(unittest.TestCase):
             self.assertEqual(self.client.get(path).status_code, 200)
         result = self.update_map()
         self.assertGreater(len(result['election-map']['figure']['data'][0]['locations']), 3000)
+        self.assertEqual(result['election-map']['figure']['layout']['mapbox']['style'], 'open-street-map')
         self.assertIsNone(result['selected-county']['data'])
         result = self.update_map(year=[2000, 2020], mode='Election Swing')
         self.assertGreater(len(result['election-map']['figure']['data'][0]['locations']), 3000)
+        self.assertEqual(result['election-map']['figure']['layout']['mapbox']['style'], 'open-street-map')
 
     def test_county_selection_is_per_browser_and_survives_year_change(self):
         click = {'points': [{'location': '01001'}]}
