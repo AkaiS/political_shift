@@ -1,0 +1,20 @@
+[app]
+name = "political-shift"
+version = "1.0.0"
+description = "County election outcomes and voting swings from 2000 to 2020"
+
+[runtime.container]
+image = "Dockerfile"
+port = 8080
+
+[routing]
+health_check = "/healthz"
+public_paths = ["/"]
+
+[resources]
+memory_mb = 512
+build_memory_mb = 512
+cpu_cores = 0.5
+
+[data]
+app_data = false

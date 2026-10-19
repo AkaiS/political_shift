@@ -1,20 +1,15 @@
-import requests
-from urllib3.exceptions import HTTPError
-from flask import Flask
+import json
+from pathlib import Path
 
 import pandas as pd
 import numpy as np
 
 from plotly import graph_objects as go
-from dash import Dash, html, dcc, Output, Input, callback, no_update, ctx
+from dash import Dash, html, dcc, Output, Input, State, callback, no_update, ctx
 
-# get geojson data
-try:
-  r = requests.get('https://raw.githubusercontent.com/plotly/datasets/master/geojson-counties-fips.json')
-  r.raise_for_status()
-except HTTPError as e:
-  print(f'Ran into HTTPError: {e}')
-counties = r.json()
+DATA_DIR = Path(__file__).resolve().parent
+with (DATA_DIR / 'counties.geojson').open() as source:
+  counties = json.load(source)
 
 # format state and county info to match ID found in state_df
 counties_df = pd.DataFrame({**lo['properties'],
@@ -41,7 +36,7 @@ import_cols = [('County',	''),
   ('ID', ''),
 ]
 
-states_df = pd.read_csv('counties_minus_alaskan.csv',
+states_df = pd.read_csv(DATA_DIR / 'counties_minus_alaskan.csv',
                         index_col=0,
                         skiprows=2,
                         names=import_cols,
@@ -64,16 +59,15 @@ da_map = pd.Series(states_df['County'].values, index=states_df['ID'])
 da_map = da_map[~da_map.index.duplicated(keep='first')]
 diff['County'] = diff['ID'].map(da_map)
 
-app = Dash(__name__)
+app = Dash(__name__, title='Political Shift', suppress_callback_exceptions=True)
 server = app.server
 
-# set intial app data
-df = states_df[states_df['Year'] == 2020]
-
-prev_location = ['']
-cur_location = ['']
+@server.get('/healthz')
+def healthz():
+  return {'status': 'ok'}
 
 app.layout = html.Div([
+  dcc.Store(id='selected-county'),
   html.Div([
     html.Div([
       dcc.Dropdown(['Election Outcomes', 'Election Swing'], 'Election Outcomes', id='map-select'),
@@ -128,16 +122,16 @@ map_select_data = {
   Output('location-name', 'children'),
   Output('county-info-body', 'children'),
   Input('graph-select', 'value'),
-  Input('election-map', 'clickData'),
+  Input('selected-county', 'data'),
   Input('election-map-slider', 'value')
 )
-def select_county_info(value, _, year_range):
-  if cur_location[0] == '':
+def select_county_info(value, selected_county, year_range):
+  if not selected_county:
     return no_update, no_update
 
   if value == 'Voting Patterns':
     # prepare county time series information
-    location_df = states_df[states_df['ID'] == cur_location[0]]
+    location_df = states_df[states_df['ID'] == selected_county]
     county = location_df['County'].values[0]
     location_name = f'{county} County'
     third_party = 100 - (location_df[('Democratic', '%')] + location_df[('Republican', '%')])
@@ -175,8 +169,10 @@ def select_county_info(value, _, year_range):
     body = dcc.Graph(figure=info_fig)
 
   if value == 'Voting Swing':
-    diff_df = diff[diff['ID'] == cur_location[0]]
-    location_df = states_df[states_df['ID'] == cur_location[0]]
+    if not isinstance(year_range, list):
+      year_range = [2000, 2020]
+    diff_df = diff[diff['ID'] == selected_county]
+    location_df = states_df[states_df['ID'] == selected_county]
     location_df = location_df[location_df['Year'] == year_range[1]]
     diff_df = diff_df[(diff_df['Year'] > year_range[0]) & (diff_df['Year'] <= year_range[1])]
     county = diff_df['County'].values[0]
@@ -290,6 +286,8 @@ def select_map(value):
       id='election-map-slider',
       marks={str(year): str(year) for year in states_df['Year'].unique()},
       value=[2000, 2020],
+      allowCross=False,
+      pushable=4,
     )
     dropdown_options = ['Voting Patterns', 'Voting Swing']
     graph_select = no_update
@@ -391,12 +389,14 @@ def select_data(value, map_select):
   Output('election-map', 'clickData'),
   Output('map-select-dropdown-container', 'style'),
   Output('graph-dropdown-container', 'style'),
+  Output('selected-county', 'data'),
   Input('election-map-slider', 'value'),
   Input('election-map', 'clickData'),
   Input('county-info-box-button', 'n_clicks'),
-  Input('map-select', 'value')
+  Input('map-select', 'value'),
+  State('selected-county', 'data')
 )
-def update_map(value, click_data, _, map_select):
+def update_map(value, click_data, _, map_select, selected_county):
   locations, customdata, z, zmin, zmax, colorscale = select_data(value, map_select)
   fig = go.Figure(go.Choroplethmapbox(geojson=counties,
                                       customdata=customdata,
@@ -420,14 +420,17 @@ def update_map(value, click_data, _, map_select):
   election_map_box_style = no_update
   county_info_box_style = no_update
   
-  # save clicked on locations
-  if click_data is not None:
-    prev_location[0] = cur_location[0]
-    cur_location[0] = click_data['points'][0]['location']
+  if ctx.triggered_id == 'county-info-box-button':
+    selected_county = None
+  elif ctx.triggered_id == 'election-map' and click_data is not None:
+    clicked_county = click_data['points'][0]['location']
+    selected_county = None if clicked_county == selected_county else clicked_county
 
   # check if new county is clicked to trace, focus, and bring up info panel for county
-  if prev_location[0] != cur_location[0] and ctx.triggered_id != 'county-info-box-button':
-    coords = counties_df.loc[counties_df['ID'] == cur_location[0], 'COORDINATES'].values[0][0]
+  if selected_county:
+    coords = counties_df.loc[counties_df['ID'] == selected_county, 'COORDINATES'].values[0][0]
+    while isinstance(coords[0][0], list):
+      coords = coords[0]
     lon, lat = zip(*coords)
     lon += (lon[0], )
     lat += (lat[0], )
@@ -436,7 +439,7 @@ def update_map(value, click_data, _, map_select):
       lat=lat,
       lon=lon,
       line={'width': 1, 'color': 'black'},
-      name=cur_location[0],
+      name=selected_county,
     ))
 
     # make info panel visible
@@ -459,8 +462,6 @@ def update_map(value, click_data, _, map_select):
 
   # reset to full map view if clicking on same location
   else:
-    prev_location[0] = ''
-    cur_location[0] = ''
     election_map_box_style = {'display': 'inline-block', 'width': '100%'}
     county_info_box_style = {'display': 'none', 'width': '0'}
     map_select_style = {'display': 'inline-block', 'width': '100%'}
@@ -468,6 +469,6 @@ def update_map(value, click_data, _, map_select):
 
   fig.update_traces(hoverinfo="none", hovertemplate=None)
 
-  return fig, election_map_box_style, county_info_box_style, None, map_select_style, graph_select_style
+  return fig, election_map_box_style, county_info_box_style, None, map_select_style, graph_select_style, selected_county
 
 # app.run()
