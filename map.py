@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -5,10 +6,14 @@ import pandas as pd
 import numpy as np
 
 from plotly import graph_objects as go
-from dash import Dash, html, dcc, Output, Input, State, callback, no_update, ctx
+from dash import Dash, html, dcc, Output, Input, State, Patch, callback, no_update, ctx
+from flask import send_file
 
 DATA_DIR = Path(__file__).resolve().parent
-with (DATA_DIR / 'counties.geojson').open() as source:
+COUNTIES_FILE = DATA_DIR / 'counties.geojson'
+COUNTIES_VERSION = hashlib.sha256(COUNTIES_FILE.read_bytes()).hexdigest()[:16]
+COUNTIES_URL = f'/data/counties-{COUNTIES_VERSION}.geojson'
+with COUNTIES_FILE.open() as source:
   counties = json.load(source)
 
 # format state and county info to match ID found in state_df
@@ -62,48 +67,17 @@ diff['County'] = diff['ID'].map(da_map)
 app = Dash(__name__, title='Political Shift', suppress_callback_exceptions=True)
 server = app.server
 
+@server.get(COUNTIES_URL)
+def county_geometry():
+  response = send_file(COUNTIES_FILE, mimetype='application/geo+json',
+                       max_age=31536000, etag=COUNTIES_VERSION, conditional=True)
+  response.cache_control.immutable = True
+  return response
+
+
 @server.get('/healthz')
 def healthz():
   return {'status': 'ok'}
-
-app.layout = html.Div([
-  dcc.Store(id='selected-county'),
-  html.Div([
-    html.Div([
-      dcc.Dropdown(['Election Outcomes', 'Election Swing'], 'Election Outcomes', id='map-select'),
-    ], id='map-select-dropdown-container', style={'display': 'inline-block', 'width': '100%'}),
-    html.Div([
-      dcc.Dropdown(['Voting Patterns', 'Voting Swing'], 'Voting Patterns', id='graph-select')
-    ], id='graph-dropdown-container', style={'display': 'None'})
-  ]),
-  html.Div([
-    html.Div([
-      dcc.Graph(
-        id='election-map', clear_on_unhover=True
-      ),
-    ], id='election-map-box', style={'width': '100%'}),
-    html.Div([
-        html.Div([
-          html.H4(id='location-name', style={'display': 'inline-block', 'margin-left': '8px'}),
-          html.Button(id='county-info-box-button',
-                      children='Close Graph',
-                      style={'display': 'inline-block',
-                             'margin-right': '8px'}
-                      )
-          ],
-          style={'height': '45px',
-                 'display': 'flex',
-                 'justify-content': 'space-between',
-                 'background': 'white',
-                 'text-align': 'center',
-                 'align-items': 'center'}
-        ),
-        html.Div(id='county-info-body')
-    ], id='county-info-box', style={'width': '0', 'display': None})
-  ]),
-  dcc.Tooltip(id='election-hover-results'),
-  html.Div(id='slider-container')
-])
 
 # set datasets for different maps
 map_select_data = {
@@ -259,7 +233,8 @@ def select_county_info(value, selected_county, year_range):
     Output('slider-container', 'children'),
     Output('graph-select', 'options'),
     Output('graph-select', 'value'),
-    Input('map-select', 'value')
+    Input('map-select', 'value'),
+    prevent_initial_call=True,
 )
 def select_map(value):
   if value == 'Election Outcomes':
@@ -294,61 +269,20 @@ def select_map(value):
 
   return map_slider, dropdown_options, graph_select
 
-# generate hover view
-@callback(
-    Output('election-hover-results', 'show'),
-    Output('election-hover-results', 'bbox'),
-    Output('election-hover-results', 'children'),
-    Input('election-map', 'hoverData'),
-    Input('county-info-box', 'style'),
-    Input('map-select', 'value')
-)
-def display_hover_results(hover_data, style, map_select):
-  if hover_data is None or style['display'] == 'inline-block':
-    return False, no_update, no_update
-  customdata = hover_data['points'][0]['customdata']
-  bbox = hover_data['points'][0]['bbox']
+# Plotly renders hover labels locally using the data already in the figure.
+OUTCOME_HOVER = ('<b>%{customdata[1]} County</b><br>'
+                 'Democratic: %{customdata[2]}%<br>'
+                 'Republican: %{customdata[3]}%<extra></extra>')
+SWING_HOVER = '<b>%{customdata[1]} County</b><br>%{customdata[4]}<extra></extra>'
 
-  if map_select == 'Election Outcomes':
-    children = [
-      html.Div([
-        html.B(f'{customdata[1]} County'),
-        html.Br(),
-        html.P('Parties', style={'fontSize':'12px', 'opacity': .8}),
-        html.Hr(),
-        html.Div([
-          html.P(f'Democratic: {customdata[2]}%'),
-          html.P(f'Republican: {customdata[3]}%')
-        ])
-      ])
-    ]
-  else:
-    val = round(customdata[2] - customdata[3], 2)
-    if val > 0:
-      party = 'Democrats'
-      opp_party = 'Republicans'
-    elif val < 0:
-      party = 'Republicans'
-      opp_party = 'Democrats'
-    else:
-      party = 'Even'
-    if party != 'Even':
-      formatted_ele = html.P(f'{party} have gained {abs(val)} points on the {opp_party}')
-    else:
-      formatted_ele = html.P(f'{party}')
-    children = [
-      html.Div([
-        html.B(f'{customdata[1]} County'),
-        html.Br(),
-        html.P('Swing', style={'fontSize':'12px', 'opacity': .8}),
-        html.Hr(),
-        html.Div([
-          formatted_ele
-        ])
-      ])
-    ]
 
-  return True, bbox, children
+def swing_label(value):
+  value = round(value, 2)
+  if value == 0:
+    return 'Even'
+  party, opponent = ('Democrats', 'Republicans') if value > 0 else ('Republicans', 'Democrats')
+  return f'{party} have gained {abs(value)} points on the {opponent}'
+
 
 # filter data relative to map and year(s) chosen
 def select_data(value, map_select):
@@ -377,11 +311,44 @@ def select_data(value, map_select):
     }).reset_index()
     customdata = pd.concat([cdf['ID'], cdf[('County', '')], cdf[('Democratic', '%')], cdf[('Republican', '%')]], axis=1)
     z = cdf[('Democratic', '%')] - cdf[('Republican', '%')]
+    customdata['swing_label'] = [swing_label(value) for value in z]
     zmin = -25
     zmax = 25
   return cdf['ID'], customdata, z, zmin, zmax, current['colorscale']
 
-# present the map
+def initial_map():
+  locations, customdata, z, zmin, zmax, colorscale = select_data(2000, 'Election Outcomes')
+  fig = go.Figure(go.Choroplethmapbox(
+    geojson=COUNTIES_URL,
+    customdata=customdata.to_numpy().tolist(),
+    locations=locations.tolist(),
+    z=z.tolist(),
+    colorscale=colorscale,
+    zmin=zmin,
+    zmax=zmax,
+    marker_opacity=.6,
+    marker_line_width=.2,
+    name='',
+    showscale=False,
+    hovertemplate=OUTCOME_HOVER,
+  ))
+  # Keep a separate trace for selection so county clicks never replace the map.
+  fig.add_trace(go.Scattermapbox(
+    mode='lines', lat=[], lon=[], line={'width': 1, 'color': 'black'},
+    hoverinfo='skip', showlegend=False,
+  ))
+  fig.update_layout(
+    uirevision=True,
+    mapbox_style='open-street-map',
+    mapbox_zoom=3,
+    mapbox_center={'lat': 37.0902, 'lon': -95.7129},
+    margin={'r': 0, 't': 0, 'b': 0, 'l': 0},
+    showlegend=False,
+  )
+  return fig
+
+
+# Update only the values that changed; the browser retains geometry and traces.
 @callback(
   Output('election-map', 'figure'),
   Output('election-map-box', 'style'),
@@ -393,33 +360,21 @@ def select_data(value, map_select):
   Input('election-map-slider', 'value'),
   Input('election-map', 'clickData'),
   Input('county-info-box-button', 'n_clicks'),
-  Input('map-select', 'value'),
-  State('selected-county', 'data')
+  State('map-select', 'value'),
+  State('selected-county', 'data'),
+  prevent_initial_call=True,
 )
 def update_map(value, click_data, _, map_select, selected_county):
-  locations, customdata, z, zmin, zmax, colorscale = select_data(value, map_select)
-  fig = go.Figure(go.Choroplethmapbox(geojson=counties,
-                                      customdata=customdata,
-                                      locations=locations,
-                                      z=z,
-                                      colorscale=colorscale,
-                                      zmin=zmin,
-                                      zmax=zmax,
-                                      marker_opacity=.6,
-                                      marker_line_width=.2,
-                                      name='',
-                                      showscale=False
-                                      ))
+  fig = Patch()
+  if ctx.triggered_id == 'election-map-slider':
+    locations, customdata, z, zmin, zmax, colorscale = select_data(value, map_select)
+    fig['data'][0]['locations'] = locations.tolist()
+    fig['data'][0]['customdata'] = customdata.to_numpy().tolist()
+    fig['data'][0]['z'] = z.tolist()
+    fig['data'][0]['zmin'] = zmin
+    fig['data'][0]['zmax'] = zmax
+    fig['data'][0]['colorscale'] = go.Choroplethmapbox(colorscale=colorscale).colorscale
 
-  fig['layout']['uirevision'] = True
-  fig.update_layout(mapbox_style='open-street-map',
-                    mapbox_zoom=3,
-                    mapbox_center={'lat': 37.0902, 'lon': -95.7129})
-  fig.update_layout(margin={'r': 0, 't': 0, 'b': 0, 'l': 0})
-  
-  election_map_box_style = no_update
-  county_info_box_style = no_update
-  
   if ctx.triggered_id == 'county-info-box-button':
     selected_county = None
   elif ctx.triggered_id == 'election-map' and click_data is not None:
@@ -428,47 +383,83 @@ def update_map(value, click_data, _, map_select, selected_county):
 
   # check if new county is clicked to trace, focus, and bring up info panel for county
   if selected_county:
-    coords = counties_df.loc[counties_df['ID'] == selected_county, 'COORDINATES'].values[0][0]
-    while isinstance(coords[0][0], list):
-      coords = coords[0]
-    lon, lat = zip(*coords)
-    lon += (lon[0], )
-    lat += (lat[0], )
-    fig.add_trace(go.Scattermapbox(
-      mode='lines',
-      lat=lat,
-      lon=lon,
-      line={'width': 1, 'color': 'black'},
-      name=selected_county,
-    ))
-
     # make info panel visible
     election_map_box_style = {'display': 'inline-block', 'width': '60%'}
     county_info_box_style = {'display': 'inline-block', 'width': '40%', 'vertical-align': 'top'}
     map_select_style = {'display': 'inline-block', 'width': '60%'}
     graph_select_style = {'display': 'inline-block', 'width': '40%'}
 
-    # set the camera location and zoom based on county clicked on
-    x_max = max(lat)
-    x_min = min(lat)
-    y_max = max(lon)
-    y_min = min(lon)
-    x_diff = abs(x_max - x_min)
-    y_diff = abs(y_max - y_min)
-    max_diff = max(x_diff, y_diff)
-    zoom = 11.5 - np.log(max_diff * 111)
-    fig.update_layout(mapbox_zoom=zoom,
-                      mapbox_center={'lat': x_min + (x_diff / 2), 'lon': y_min + (y_diff / 2)})
+    if ctx.triggered_id == 'election-map':
+      coords = counties_df.loc[counties_df['ID'] == selected_county, 'COORDINATES'].values[0][0]
+      while isinstance(coords[0][0], list):
+        coords = coords[0]
+      lon, lat = zip(*coords)
+      lon += (lon[0], )
+      lat += (lat[0], )
+      fig['data'][1]['lat'] = lat
+      fig['data'][1]['lon'] = lon
+      fig['data'][1]['name'] = selected_county
+
+      # Focus the selected county only on a click, preserving pans on year changes.
+      x_min, x_max = min(lat), max(lat)
+      y_min, y_max = min(lon), max(lon)
+      x_diff, y_diff = x_max - x_min, y_max - y_min
+      fig['layout']['mapbox']['zoom'] = 11.5 - np.log(max(x_diff, y_diff) * 111)
+      fig['layout']['mapbox']['center'] = {'lat': x_min + (x_diff / 2), 'lon': y_min + (y_diff / 2)}
 
   # reset to full map view if clicking on same location
   else:
+    fig['data'][1]['lat'] = []
+    fig['data'][1]['lon'] = []
+    if ctx.triggered_id in ('election-map', 'county-info-box-button'):
+      fig['layout']['mapbox']['zoom'] = 3
+      fig['layout']['mapbox']['center'] = {'lat': 37.0902, 'lon': -95.7129}
     election_map_box_style = {'display': 'inline-block', 'width': '100%'}
     county_info_box_style = {'display': 'none', 'width': '0'}
     map_select_style = {'display': 'inline-block', 'width': '100%'}
     graph_select_style = {'display': 'None'}
 
-  fig.update_traces(hoverinfo="none", hovertemplate=None)
+  fig['data'][0]['hoverinfo'] = 'none' if selected_county else 'all'
+  fig['data'][0]['hovertemplate'] = None if selected_county else (
+    OUTCOME_HOVER if map_select == 'Election Outcomes' else SWING_HOVER
+  )
 
   return fig, election_map_box_style, county_info_box_style, None, map_select_style, graph_select_style, selected_county
 
-# app.run()
+app.layout = html.Div([
+  dcc.Store(id='selected-county'),
+  html.Div([
+    html.Div([
+      dcc.Dropdown(['Election Outcomes', 'Election Swing'], 'Election Outcomes', id='map-select'),
+    ], id='map-select-dropdown-container', style={'display': 'inline-block', 'width': '100%'}),
+    html.Div([
+      dcc.Dropdown(select_map('Election Outcomes')[1], 'Voting Patterns', id='graph-select')
+    ], id='graph-dropdown-container', style={'display': 'None'})
+  ]),
+  html.Div([
+    html.Div([
+      dcc.Graph(
+        id='election-map', figure=initial_map()
+      ),
+    ], id='election-map-box', style={'width': '100%'}),
+    html.Div([
+        html.Div([
+          html.H4(id='location-name', style={'display': 'inline-block', 'margin-left': '8px'}),
+          html.Button(id='county-info-box-button',
+                      children='Close Graph',
+                      style={'display': 'inline-block',
+                             'margin-right': '8px'}
+                      )
+          ],
+          style={'height': '45px',
+                 'display': 'flex',
+                 'justify-content': 'space-between',
+                 'background': 'white',
+                 'text-align': 'center',
+                 'align-items': 'center'}
+        ),
+        html.Div(id='county-info-body')
+    ], id='county-info-box', style={'width': '0', 'display': 'none'})
+  ]),
+  html.Div(select_map('Election Outcomes')[0], id='slider-container')
+])

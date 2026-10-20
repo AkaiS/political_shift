@@ -55,6 +55,12 @@ Both files load from the app directory, so server startup needs no network
 requests. The browser loads OpenStreetMap basemap tiles through Plotly's
 `open-street-map` style. No API key is required.
 
+County boundaries load once from a versioned URL with a one-year browser cache.
+Year changes send partial figure updates, and county clicks update only the
+highlight and camera. Hover labels render in the browser without server requests.
+The initial layout includes the map and year slider. Callback tests enforce
+response-size limits and check geometry caching alongside selection behavior.
+
 Direct dependency ranges live in `requirements.in`; `requirements.txt` pins
 the full environment. Refresh the lock with
 `uv pip compile requirements.in --python-version 3.12 --output-file requirements.txt`.
